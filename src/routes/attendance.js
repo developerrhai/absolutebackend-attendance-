@@ -201,7 +201,7 @@ router.put("/record", async (req, res) => {
 });
 
 // ── POST /api/attendance/notify-whatsapp ──────────────────────────────────────
-router.post("/notify-whatsapp", async (req, res) => {
+/* router.post("/notify-whatsapp", async (req, res) => {
   const { date } = req.body;
 
   if (!date) {
@@ -246,6 +246,413 @@ router.post("/notify-whatsapp", async (req, res) => {
     console.error("[WhatsApp] POST /notify-whatsapp", err.message);
     return res.status(500).json({ success: false, error: err.message });
   }
+});  */
+
+/*
+router.post("/notify-whatsapp", async (req, res) => {
+  const axios = require("axios");
+  const FormData = require("form-data");
+
+  const { date } = req.body;
+
+  if (!date) {
+    return res.status(400).json({
+      success: false,
+      error: "date is required",
+    });
+  }
+
+  try {
+    const result = await getAttendanceForDate(date);
+
+    const absentStudents = result.records.filter(
+      (r) => r.status === "Absent"
+    );
+
+    let successCount = 0;
+    let failedCount = 0;
+    const results = [];
+
+    for (const student of absentStudents) {
+      try {
+        const parentMobile =
+          student.parentMobile ||
+          student.contact ||
+          student.mobile;
+
+        if (!parentMobile) {
+          failedCount++;
+
+          results.push({
+            student: student.name,
+            status: "failed",
+            reason: "Parent mobile number not found",
+          });
+
+          continue;
+        }
+
+        let mobile = String(parentMobile).replace(/\D/g, "");
+
+        if (!mobile.startsWith("91")) {
+          mobile = `91${mobile}`;
+        }
+
+        const form = new FormData();
+
+        form.append(
+          "appkey",
+          process.env.WHATSAPP_APP_KEY
+        );
+
+        form.append(
+          "authkey",
+          process.env.WHATSAPP_AUTH_KEY
+        );
+
+        form.append("to", mobile);
+
+        form.append(
+          "template_id",
+          process.env.WHATSAPP_TEMPLATE_ID
+        );
+
+        form.append("language", "en");
+
+        // Template:
+        // Respected Parent,
+        // {{1}} has {{2}} at Absolute Foundation {{3}}.
+        // Thank you!
+
+        form.append(
+          "variables[{1}]",
+          student.name
+        );
+
+        form.append(
+          "variables[{2}]",
+          "been marked ABSENT"
+        );
+
+        form.append(
+          "variables[{3}]",
+          `on ${date}`
+        );
+
+        const response = await axios.post(
+          process.env.WHATSAPP_API_URL,
+          form,
+          {
+            headers: form.getHeaders(),
+            timeout: 30000,
+          }
+        );
+
+        successCount++;
+
+        results.push({
+          student: student.name,
+          mobile,
+          status: "sent",
+          response: response.data,
+        });
+
+        console.log(
+          `[WhatsApp] Sent to ${student.name} (${mobile})`
+        );
+      } catch (err) {
+        failedCount++;
+
+        console.error(
+          `[WhatsApp] Failed for ${
+            student.name || "Unknown Student"
+          }`,
+          err.response?.data || err.message
+        );
+
+        results.push({
+          student: student.name,
+          status: "failed",
+          error:
+            err.response?.data ||
+            err.message,
+        });
+      }
+    }
+
+    return res.json({
+      success: true,
+      date,
+      totalAbsent: absentStudents.length,
+      sent: successCount,
+      failed: failedCount,
+      results,
+    });
+  } catch (err) {
+    console.error(
+      "[WhatsApp] POST /notify-whatsapp",
+      err
+    );
+
+    return res.status(500).json({
+      success: false,
+      error: err.message,
+    });
+  }
+}); */
+
+
+
+router.post("/notify-whatsapp", async (req, res) => {
+  const axios = require("axios");
+  const FormData = require("form-data");
+
+  const { date } = req.body;
+
+  if (!date) {
+    return res.status(400).json({
+      success: false,
+      error: "date is required",
+    });
+  }
+
+  try {
+    const result = await getAttendanceForDate(date);
+
+    const absentStudents = result.records.filter(
+      (r) => r.status === "Absent"
+    );
+
+    const lateStudents = result.records.filter(
+      (r) => r.status === "Late"
+    );
+
+    // =========================================================================
+    // NEW BACKGROUND WORKER APPROACH (Avoids Nginx 504 Gateway Timeout)
+    // =========================================================================
+    res.json({
+      success: true,
+      message: `WhatsApp notification sending started in background for ${absentStudents.length} absent students.`,
+      date,
+      summary: {
+        absent: absentStudents.length,
+        late: lateStudents.length,
+        whatsappSent: absentStudents.length,
+        whatsappFailed: 0,
+      },
+      logs: [],
+    });
+
+    // Run the sending loop asynchronously in the background
+    (async () => {
+      let sent = 0;
+      let failed = 0;
+      const logs = [];
+
+      for (const record of absentStudents) {
+        try {
+          const student = record.student;
+
+          if (!student?.contact) {
+            failed++;
+            continue;
+          }
+
+          // Clean mobile number
+          let mobile = String(student.contact).replace(/\D/g, "");
+          if (!mobile.startsWith("91")) {
+            mobile = "91" + mobile;
+          }
+
+          const form = new FormData();
+          form.append(
+            "appkey",
+            process.env.WHATSAPP_APP_KEY || "63b954ad-a264-4f1a-bc06-738f3f8e0ea5"
+          );
+          form.append(
+            "authkey",
+            process.env.WHATSAPP_AUTH_KEY || "Ly1rcczQU9gILsKa4qW8vvTIAQ63BEmNH4g64HJyi7xsziQR4J"
+          );
+          form.append("to", mobile);
+          form.append("template_id", "present");
+          form.append("language", "en");
+
+          form.append("variables[{1}]", student.name);
+          form.append("variables[{2}]", "Absent");
+          form.append(
+            "variables[{3}]",
+            new Date(date).toLocaleString("en-IN", {
+              day: "2-digit",
+              month: "2-digit",
+              year: "numeric",
+              hour: "2-digit",
+              minute: "2-digit",
+              hour12: true,
+            })
+          );
+
+          const response = await axios.post(
+            "https://api.rhaitech.online/api/create-message",
+            form,
+            {
+              headers: form.getHeaders(),
+              timeout: 30000,
+            }
+          );
+
+          sent++;
+          console.log(`[WhatsApp Sent] ${student.name}`);
+        } catch (err) {
+          failed++;
+          console.error(
+            `[WhatsApp Failed] ${record.student?.name || "Unknown"}:`,
+            err.response?.data || err.message
+          );
+        }
+
+        // 🔥 1500ms delay to avoid Rhaitech rate limit
+        await new Promise((r) => setTimeout(r, 1500));
+      }
+      console.log(`[WhatsApp Batch Finished] Sent: ${sent}, Failed: ${failed}`);
+    })().catch((err) => {
+      console.error("[WhatsApp Background Loop Error]", err);
+    });
+
+    /*
+    // =========================================================================
+    // ORIGINAL SYNCHRONOUS CODE (Keep for reference - commented out to prevent timeout)
+    // =========================================================================
+    let sent = 0;
+    let failed = 0;
+    const logs = [];
+
+    for (const record of absentStudents) {
+      try {
+        const student = record.student;
+
+        if (!student?.contact) {
+          failed++;
+          logs.push({
+            student: student?.name || "Unknown",
+            status: "failed",
+            reason: "Missing contact number",
+          });
+          continue;
+        }
+
+        // =========================
+        // CLEAN MOBILE NUMBER
+        // =========================
+        let mobile = String(student.contact).replace(/\D/g, "");
+        if (!mobile.startsWith("91")) {
+          mobile = "91" + mobile;
+        }
+
+        // =========================
+        // CREATE FORM DATA
+        // =========================
+        const form = new FormData();
+
+        form.append(
+          "appkey",
+          process.env.WHATSAPP_APP_KEY || "63b954ad-a264-4f1a-bc06-738f3f8e0ea5"
+        );
+
+        form.append(
+          "authkey",
+          process.env.WHATSAPP_AUTH_KEY || "Ly1rcczQU9gILsKa4qW8vvTIAQ63BEmNH4g64HJyi7xsziQR4J"
+        );
+
+        form.append("to", mobile);
+
+        // 🔥 IMPORTANT TEMPLATE SETTINGS
+        form.append("template_id", "present");
+        form.append("language", "en_us");
+
+        // =========================
+        // TEMPLATE VARIABLES (FIXED)
+        // =========================
+        form.append("variables[{1}]", student.name);
+
+        form.append(
+          "variables[{2}]",
+          "ABSENT"
+        );
+
+        form.append(
+          "variables[{3}]",
+          new Date(date).toLocaleString("en-IN", {
+            day: "2-digit",
+            month: "2-digit",
+            year: "numeric",
+            hour: "2-digit",
+            minute: "2-digit",
+            hour12: true,
+          })
+        );
+
+        // =========================
+        // API CALL
+        // =========================
+        const response = await axios.post(
+          "https://api.rhaitech.online/api/create-message",
+          form,
+          {
+            headers: form.getHeaders(),
+            timeout: 30000,
+          }
+        );
+
+        sent++;
+
+        logs.push({
+          student: student.name,
+          mobile,
+          status: "sent",
+          response: response.data,
+        });
+
+        console.log(`[WhatsApp Sent] ${student.name}`);
+      } catch (err) {
+        failed++;
+
+        logs.push({
+          student: record.student?.name || "Unknown",
+          status: "failed",
+          error: err.response?.data || err.message,
+        });
+
+        console.error(
+          `[WhatsApp Failed] ${record.student?.name || "Unknown"}`,
+          err.response?.data || err.message
+        );
+      }
+
+      // 🔥 avoid rate limit
+      await new Promise((r) => setTimeout(r, 500));
+    }
+
+    return res.json({
+      success: true,
+      date,
+      summary: {
+        absent: absentStudents.length,
+        late: lateStudents.length,
+        whatsappSent: sent,
+        whatsappFailed: failed,
+      },
+      logs,
+    });
+    */
+  } catch (err) {
+    console.error("[WhatsApp ERROR]", err);
+
+    return res.status(500).json({
+      success: false,
+      error: err.message,
+    });
+  }
 });
+       
 
 module.exports = router;

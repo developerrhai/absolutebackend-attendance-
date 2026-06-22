@@ -1,6 +1,9 @@
 const mysql = require("mysql2/promise");
-require("dotenv").config();
+const path = require("path");
 
+require("dotenv").config({
+  path: path.resolve(__dirname, "../../.env"),
+});
 let pool = null;
 
 /**
@@ -92,6 +95,17 @@ async function initDb() {
         date         DATE        NOT NULL,
         created_at   TIMESTAMP   DEFAULT CURRENT_TIMESTAMP,
         UNIQUE KEY uq_leave (student_code, date)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+    `);
+
+    // ── Sent notifications (duplicates prevention) ─────────────────────────
+    await conn.execute(`
+      CREATE TABLE IF NOT EXISTS sent_notifications (
+        id           INT AUTO_INCREMENT PRIMARY KEY,
+        student_code VARCHAR(50) NOT NULL,
+        punch_time   VARCHAR(50) NOT NULL,
+        created_at   TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE KEY uq_student_punch (student_code, punch_time)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
     `);
 
