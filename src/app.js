@@ -18,7 +18,7 @@ const PORT = process.env.PORT || 5000;
 app.use(
   cors({
     origin: [
-      process.env.FRONTEND_ORIGIN || "http://localhost:3000",
+      process.env.FRONTEND_ORIGIN || "https://absolutefoundationattendance.vercel.app",
       // Add your production domain here when deploying
       // "https://your-frontend.com",
     ],
@@ -50,6 +50,14 @@ app.use("/api/attendance", attendanceRouter);
 app.use("/api/students",   studentsRouter);
 app.use("/api/biometric",  biometricRouter);
 
+// ─── START SERVER ─────────────────────────────────────────
+/* app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+
+  // ✅ ADD THIS HERE
+  require("./routes/attendanceWatcher");
+}); */
+
 // ─── 404 Handler ─────────────────────────────────────────────────────────────
 app.use((_req, res) => {
   res.status(404).json({ success: false, error: "Route not found" });
@@ -72,6 +80,7 @@ async function start() {
     await initDb();
 
     app.listen(PORT, () => {
+       require("./routes/attendanceWatcher");
       console.log("─────────────────────────────────────────────────────");
       console.log(`  Attendance Backend running on http://localhost:${PORT}`);
       console.log("─────────────────────────────────────────────────────");
