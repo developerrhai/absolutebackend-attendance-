@@ -8,6 +8,7 @@ const { initDb } = require("./config/db");
 const attendanceRouter = require("./routes/attendance");
 const studentsRouter   = require("./routes/students");
 const biometricRouter  = require("./routes/biometric");
+const batchesRouter    = require("./routes/batches");
 
 const app  = express();
 const PORT = process.env.PORT || 5000;
@@ -49,6 +50,15 @@ app.get("/api/health", (_req, res) => {
 app.use("/api/attendance", attendanceRouter);
 app.use("/api/students",   studentsRouter);
 app.use("/api/biometric",  biometricRouter);
+app.use("/api/batches",    batchesRouter);
+
+// ─── START SERVER ─────────────────────────────────────────
+/* app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+
+  // ✅ ADD THIS HERE
+  require("./routes/attendanceWatcher");
+}); */
 
 // ─── 404 Handler ─────────────────────────────────────────────────────────────
 app.use((_req, res) => {
@@ -72,6 +82,7 @@ async function start() {
     await initDb();
 
     app.listen(PORT, () => {
+       require("./routes/attendanceWatcher");
       console.log("─────────────────────────────────────────────────────");
       console.log(`  Attendance Backend running on http://localhost:${PORT}`);
       console.log("─────────────────────────────────────────────────────");

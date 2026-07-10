@@ -4,19 +4,17 @@ const SMARTOFFICE_BASE   = process.env.SMARTOFFICE_BASE_URL    || "http://13.232
 const API_KEY            = process.env.SMARTOFFICE_API_KEY     || "385619062612";
 const DEFAULT_SERIAL     = process.env.SMARTOFFICE_SERIAL_NUMBER || "AMDB25121401560";
 
-// Late threshold: punch-in after 09:15 = "Late"
-const LATE_HOUR   = 9;
-const LATE_MINUTE = 15;
+// Default virtual batch for students who don't have explicit batches assigned
+const DEFAULT_BATCH = {
+  id: null,
+  name: "General Batch",
+  start_time: "09:00:00",
+  end_time: "17:30:00",
+  late_grace_minutes: 15,
+};
 
 // ─── SmartOffice API ──────────────────────────────────────────────────────────
 
-/**
- * Fetch raw biometric logs from SmartOffice GetDeviceLogs API.
- * @param {string} fromDate   YYYY-MM-DD
- * @param {string} toDate     YYYY-MM-DD
- * @param {string} [serial]   Device serial number
- * @returns {Promise<Array>}  Array of BiometricLog objects
- */
 async function fetchBiometricLogs(fromDate, toDate, serial) {
   const serialNumber = serial || DEFAULT_SERIAL;
 
@@ -30,7 +28,6 @@ async function fetchBiometricLogs(fromDate, toDate, serial) {
   const url = `${SMARTOFFICE_BASE}/api/v2/WebAPI/GetDeviceLogs?${params}`;
   console.log(`[SmartOffice] GET ${url}`);
 
-  // AbortSignal.timeout is available in Node ≥ 17.3; safe fallback for older
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 15_000);
 
@@ -60,7 +57,6 @@ async function fetchBiometricLogs(fromDate, toDate, serial) {
 // ─── Attendance computation ───────────────────────────────────────────────────
 
 function parseLogDate(logDate) {
-  // SmartOffice format: "2026-05-21 08:45:29"
   return new Date(logDate.replace(" ", "T"));
 }
 
@@ -72,37 +68,19 @@ function formatTime(date) {
   });
 }
 
-function computeStatus(logs) {
-  if (!logs.length) return { status: "Absent", punchIn: null, punchOut: null };
-
-  const sorted = [...logs].sort(
-    (a, b) => parseLogDate(a.LogDate).getTime() - parseLogDate(b.LogDate).getTime()
-  );
-
-  const first = parseLogDate(sorted[0].LogDate);
-  const last  = sorted.length > 1 ? parseLogDate(sorted[sorted.length - 1].LogDate) : null;
-
-  const threshold = new Date(first);
-  threshold.setHours(LATE_HOUR, LATE_MINUTE, 0, 0);
-
-  return {
-    status:   first > threshold ? "Late" : "Present",
-    punchIn:  formatTime(first),
-    punchOut: last ? formatTime(last) : null,
-  };
+function timeToMinutes(timeStr) {
+  if (!timeStr) return 0;
+  const parts = timeStr.split(":");
+  const h = Number(parts[0] || 0);
+  const m = Number(parts[1] || 0);
+  return h * 60 + m;
 }
 
 /**
- * Join students (from DB) with biometric logs (from SmartOffice) by EmployeeCode.
- * @param {Array} students  Rows from `students` table
- * @param {Array} logs      Rows from SmartOffice API
- * @param {string} date     YYYY-MM-DD
- * @param {Set}   leaveSet  Set of student codes on leave that day
- * @param {Map}   overrideMap  Map of student_code → override row
- * @returns {Array} Enriched attendance records
+ * Join students (from DB) with biometric logs (from SmartOffice) by EmployeeCode, per assigned batch.
+ * Groups consecutive/adjacent batches into sessions if the gap is <= 3 hours (180 mins).
  */
-function buildAttendanceRecords(students, logs, date, leaveSet, overrideMap) {
-  // Group logs by EmployeeCode
+function buildAttendanceRecords(students, logs, date, leaveSet, overrideMap, studentBatchesMap) {
   const byCode = new Map();
   for (const log of logs) {
     const code = String(log.EmployeeCode).trim();
@@ -110,52 +88,162 @@ function buildAttendanceRecords(students, logs, date, leaveSet, overrideMap) {
     byCode.get(code).push(log);
   }
 
-  return students.map((student) => {
-    const code        = String(student.code).trim();
+  const records = [];
+
+  for (const student of students) {
+    const code = String(student.code).trim();
     const studentLogs = byCode.get(code) || [];
-    const latestLog   = studentLogs[0] || null;
 
-    let { status, punchIn, punchOut } = computeStatus(studentLogs);
+    // Get assigned batches or fall back to default
+    const assignedBatches = studentBatchesMap.get(code) || [];
+    const activeBatches = assignedBatches.length > 0 ? assignedBatches : [DEFAULT_BATCH];
 
-    // Apply leave
-    if (leaveSet && leaveSet.has(code)) {
-      status   = "On Leave";
-      punchIn  = null;
-      punchOut = null;
+    // Sort batches by start time
+    const sortedBatches = [...activeBatches].sort((a, b) => {
+      return timeToMinutes(a.start_time) - timeToMinutes(b.start_time);
+    });
+
+    // Group batches into contiguous sessions (time difference <= 180 minutes)
+    const sessions = [];
+    let currentSession = [];
+
+    for (let i = 0; i < sortedBatches.length; i++) {
+      const batch = sortedBatches[i];
+      if (currentSession.length === 0) {
+        currentSession.push(batch);
+      } else {
+        const lastBatch = currentSession[currentSession.length - 1];
+        const lastEnd = timeToMinutes(lastBatch.end_time);
+        const currentStart = timeToMinutes(batch.start_time);
+        
+        if (currentStart - lastEnd <= 180) {
+          currentSession.push(batch);
+        } else {
+          sessions.push(currentSession);
+          currentSession = [batch];
+        }
+      }
+    }
+    if (currentSession.length > 0) {
+      sessions.push(currentSession);
     }
 
-    // Apply manual override (wins over everything)
-    const override = overrideMap && overrideMap.get(code);
-    if (override) {
-      if (override.status)    status   = override.status;
-      if (override.punch_in)  punchIn  = override.punch_in;
-      if (override.punch_out) punchOut = override.punch_out;
-    }
+    // Process each session
+    for (const session of sessions) {
+      const firstBatch = session[0];
+      const lastBatch = session[session.length - 1];
 
-    return {
-      student: {
-        id:           student.id,
-        code:         student.code,
-        name:         student.name,
-        gender:       student.gender        || "",
-        contact:      student.contact       || "",
-        rollNo:       student.roll_no       || "",
-        standard:     student.standard      || "",
-        section:      student.section       || "",
-        parentName:   student.parent_name   || "",
-        parentMobile: student.parent_mobile || "",
-      },
-      date,
-      punchIn,
-      punchOut,
-      serialNumber:     latestLog?.SerialNumber     || "—",
-      status,
-      temperature:      latestLog?.Temperature      || null,
-      temperatureState: latestLog?.TemperatureState || null,
-      logCount:         studentLogs.length,
-      manuallyEdited:   !!override,
-    };
-  });
+      const sSessionMin = timeToMinutes(firstBatch.start_time);
+      const eSessionMin = timeToMinutes(lastBatch.end_time);
+
+      // Filter logs for the entire session window [S_session - 30, E_session + 30]
+      const sessionLogs = studentLogs
+        .filter((log) => {
+          const logTime = log.LogDate || log.DateTime;
+          if (!logTime) return false;
+          const logTimePart = logTime.split(" ")[1];
+          const pMin = timeToMinutes(logTimePart);
+          return pMin >= sSessionMin - 30 && pMin <= eSessionMin + 30;
+        })
+        .sort((a, b) => {
+          const timeA = parseLogDate(a.LogDate || a.DateTime).getTime();
+          const timeB = parseLogDate(b.LogDate || b.DateTime).getTime();
+          return timeA - timeB;
+        });
+
+      const sessionPunchIn = sessionLogs.length > 0 ? sessionLogs[0] : null;
+      const sessionPunchOut = sessionLogs.length > 1 ? sessionLogs[sessionLogs.length - 1] : null;
+
+      for (const batch of session) {
+        const batchId = batch.id;
+        const sMin = timeToMinutes(batch.start_time);
+        const eMin = timeToMinutes(batch.end_time);
+        const grace = batch.late_grace_minutes ?? 10;
+
+        let status = "Absent";
+        let punchIn = null;
+        let punchOut = null;
+        let serialNumber = "—";
+        let temperature = null;
+        let temperatureState = null;
+
+        if (sessionPunchIn) {
+          const pInTime = (sessionPunchIn.LogDate || sessionPunchIn.DateTime).split(" ")[1];
+          const pInMin = timeToMinutes(pInTime);
+
+          if (pInMin <= eMin) {
+            // Student entered before this batch ended
+            status = pInMin <= sMin + grace ? "Present" : "Late";
+            punchIn = formatTime(parseLogDate(sessionPunchIn.LogDate || sessionPunchIn.DateTime));
+            serialNumber = sessionPunchIn.SerialNumber || "—";
+            temperature = sessionPunchIn.Temperature || null;
+            temperatureState = sessionPunchIn.TemperatureState || null;
+          }
+        }
+
+        if (sessionPunchOut) {
+          const pOutTime = (sessionPunchOut.LogDate || sessionPunchOut.DateTime).split(" ")[1];
+          const pOutMin = timeToMinutes(pOutTime);
+
+          // Punch out must be after the start time of the batch to count as a checkout for it
+          if (pOutMin > sMin) {
+            punchOut = formatTime(parseLogDate(sessionPunchOut.LogDate || sessionPunchOut.DateTime));
+          }
+        }
+
+        // Apply leave
+        const isOnLeave = leaveSet && (leaveSet.has(`${code}:${batchId}`) || leaveSet.has(`${code}:null`));
+        if (isOnLeave) {
+          status   = "On Leave";
+          punchIn  = null;
+          punchOut = null;
+        }
+
+        // Apply manual override
+        const overrideKey = `${code}:${batchId}`;
+        const fallbackKey = `${code}:null`;
+        const override = overrideMap && (overrideMap.get(overrideKey) || overrideMap.get(fallbackKey));
+        
+        if (override) {
+          if (override.status)    status   = override.status;
+          if (override.punch_in)  punchIn  = override.punch_in;
+          if (override.punch_out) punchOut = override.punch_out;
+        }
+
+        records.push({
+          student: {
+            id:           student.id,
+            code:         student.code,
+            name:         student.name,
+            gender:       student.gender        || "",
+            contact:      student.contact       || "",
+            rollNo:       student.roll_no       || "",
+            standard:     student.standard      || "",
+            section:      student.section       || "",
+            parentName:   student.parent_name   || "",
+            parentMobile: student.parent_mobile || "",
+          },
+          batch: {
+            id:        batch.id,
+            name:      batch.name,
+            startTime: batch.start_time,
+            endTime:   batch.end_time,
+          },
+          date,
+          punchIn,
+          punchOut,
+          serialNumber,
+          status,
+          temperature,
+          temperatureState,
+          logCount: sessionLogs.length,
+          manuallyEdited: !!override,
+        });
+      }
+    }
+  }
+
+  return records;
 }
 
 function computeSummary(records) {
@@ -172,4 +260,5 @@ module.exports = {
   fetchBiometricLogs,
   buildAttendanceRecords,
   computeSummary,
+  timeToMinutes,
 };

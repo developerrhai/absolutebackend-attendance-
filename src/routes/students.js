@@ -1,11 +1,11 @@
 /**
  * Students CRUD routes
  *
- * GET    /api/students           — list all students
- * POST   /api/students           — create a new student
+ * GET    /api/students           — list all students (including their mapped batches)
+ * POST   /api/students           — create/upsert student (and save their batch mappings)
  * GET    /api/students/:code     — get single student
- * PUT    /api/students/:code     — update student profile
- * DELETE /api/students/:code     — delete student + overrides + leaves
+ * PUT    /api/students/:code     — update student profile (and update batch mappings)
+ * DELETE /api/students/:code     — delete student + overrides + leaves + batch mappings
  */
 
 const express = require("express");
@@ -34,10 +34,34 @@ function mapStudent(row) {
 // ── GET /api/students ─────────────────────────────────────────────────────────
 router.get("/", async (req, res) => {
   try {
-    const rows = await query(
+    const students = await query(
       "SELECT * FROM students ORDER BY name ASC"
     );
-    return res.json({ success: true, students: rows.map(mapStudent) });
+    const mappings = await query(
+      `SELECT sb.student_code, sb.batch_id, b.name, b.start_time, b.end_time 
+       FROM student_batches sb 
+       JOIN batches b ON sb.batch_id = b.id`
+    );
+
+    const batchMap = new Map();
+    for (const m of mappings) {
+      const code = String(m.student_code).trim();
+      if (!batchMap.has(code)) batchMap.set(code, []);
+      batchMap.get(code).push({
+        id: m.batch_id,
+        name: m.name,
+        startTime: m.start_time,
+        endTime: m.end_time
+      });
+    }
+
+    const studentsWithBatches = students.map((s) => {
+      const mapped = mapStudent(s);
+      mapped.batches = batchMap.get(String(s.code).trim()) || [];
+      return mapped;
+    });
+
+    return res.json({ success: true, students: studentsWithBatches });
   } catch (err) {
     console.error("[Students] GET /", err.message);
     return res.status(500).json({ success: false, error: err.message });
@@ -50,6 +74,7 @@ router.post("/", async (req, res) => {
     code, name, gender = "", contact = "",
     rollNo = "", standard = "", section = "",
     parentName = "", parentMobile = "",
+    batchIds = []
   } = req.body;
 
   if (!code || !name) {
@@ -76,8 +101,32 @@ router.post("/", async (req, res) => {
       [code, name, gender, contact, rollNo, standard, section, parentName, parentMobile]
     );
 
+    // Update batch mappings
+    await query("DELETE FROM student_batches WHERE student_code = ?", [code]);
+    if (Array.isArray(batchIds) && batchIds.length > 0) {
+      const values = batchIds.map((batchId) => [code, batchId]);
+      await query(
+        "INSERT INTO student_batches (student_code, batch_id) VALUES ?",
+        [values]
+      );
+    }
+
     const [row] = await query("SELECT * FROM students WHERE code = ?", [code]);
-    return res.status(201).json({ success: true, student: mapStudent(row) });
+    const mapped = mapStudent(row);
+
+    // Fetch updated mapped batches
+    const studentBatches = await query(
+      `SELECT b.* FROM batches b JOIN student_batches sb ON b.id = sb.batch_id WHERE sb.student_code = ?`,
+      [code]
+    );
+    mapped.batches = studentBatches.map(b => ({
+      id: b.id,
+      name: b.name,
+      startTime: b.start_time,
+      endTime: b.end_time
+    }));
+
+    return res.status(201).json({ success: true, student: mapped });
   } catch (err) {
     console.error("[Students] POST /", err.message);
     if (err.code === "ER_DUP_ENTRY") {
@@ -98,7 +147,21 @@ router.get("/:code", async (req, res) => {
     if (!rows.length) {
       return res.status(404).json({ success: false, error: "Student not found" });
     }
-    return res.json({ success: true, student: mapStudent(rows[0]) });
+    const mapped = mapStudent(rows[0]);
+
+    // Fetch mapped batches
+    const studentBatches = await query(
+      `SELECT b.* FROM batches b JOIN student_batches sb ON b.id = sb.batch_id WHERE sb.student_code = ?`,
+      [code]
+    );
+    mapped.batches = studentBatches.map(b => ({
+      id: b.id,
+      name: b.name,
+      startTime: b.start_time,
+      endTime: b.end_time
+    }));
+
+    return res.json({ success: true, student: mapped });
   } catch (err) {
     console.error("[Students] GET /:code", err.message);
     return res.status(500).json({ success: false, error: err.message });
@@ -112,6 +175,7 @@ router.put("/:code", async (req, res) => {
     name, gender, contact,
     rollNo, standard, section,
     parentName, parentMobile,
+    batchIds
   } = req.body;
 
   try {
@@ -144,8 +208,34 @@ router.put("/:code", async (req, res) => {
       ]
     );
 
+    // Save batch mappings if provided
+    if (batchIds !== undefined && Array.isArray(batchIds)) {
+      await query("DELETE FROM student_batches WHERE student_code = ?", [code]);
+      if (batchIds.length > 0) {
+        const values = batchIds.map((batchId) => [code, batchId]);
+        await query(
+          "INSERT INTO student_batches (student_code, batch_id) VALUES ?",
+          [values]
+        );
+      }
+    }
+
     const [updated] = await query("SELECT * FROM students WHERE code = ?", [code]);
-    return res.json({ success: true, student: mapStudent(updated) });
+    const mapped = mapStudent(updated);
+
+    // Fetch updated mapped batches
+    const studentBatches = await query(
+      `SELECT b.* FROM batches b JOIN student_batches sb ON b.id = sb.batch_id WHERE sb.student_code = ?`,
+      [code]
+    );
+    mapped.batches = studentBatches.map(b => ({
+      id: b.id,
+      name: b.name,
+      startTime: b.start_time,
+      endTime: b.end_time
+    }));
+
+    return res.json({ success: true, student: mapped });
   } catch (err) {
     console.error("[Students] PUT /:code", err.message);
     return res.status(500).json({ success: false, error: err.message });
@@ -161,7 +251,8 @@ router.delete("/:code", async (req, res) => {
       return res.status(404).json({ success: false, error: "Student not found" });
     }
 
-    // Remove attendance overrides and leaves first (FK-safe)
+    // Remove attendance overrides, leaves, batch mappings, and student
+    await query("DELETE FROM student_batches WHERE student_code = ?", [code]);
     await query("DELETE FROM attendance_overrides WHERE student_code = ?", [code]);
     await query("DELETE FROM leaves WHERE student_code = ?", [code]);
     await query("DELETE FROM students WHERE code = ?", [code]);

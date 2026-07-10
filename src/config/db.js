@@ -1,6 +1,9 @@
 const mysql = require("mysql2/promise");
-require("dotenv").config();
+const path = require("path");
 
+require("dotenv").config({
+  path: path.resolve(__dirname, "../../.env"),
+});
 let pool = null;
 
 /**
@@ -51,6 +54,19 @@ async function initDb() {
   try {
     console.log("[DB] Initialising tables…");
 
+    // ── Batches timing master ──────────────────────────────────────────────
+    await conn.execute(`
+      CREATE TABLE IF NOT EXISTS batches (
+        id                 INT AUTO_INCREMENT PRIMARY KEY,
+        name               VARCHAR(100) NOT NULL,
+        start_time         TIME NOT NULL COMMENT 'HH:MM:SS',
+        end_time           TIME NOT NULL COMMENT 'HH:MM:SS',
+        late_grace_minutes INT DEFAULT 10,
+        created_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+    `);
+
     // ── Students master ────────────────────────────────────────────────────
     await conn.execute(`
       CREATE TABLE IF NOT EXISTS students (
@@ -69,6 +85,17 @@ async function initDb() {
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
     `);
 
+    // ── Student Batches mapping ────────────────────────────────────────────
+    await conn.execute(`
+      CREATE TABLE IF NOT EXISTS student_batches (
+        student_code VARCHAR(50) NOT NULL,
+        batch_id     INT NOT NULL,
+        PRIMARY KEY (student_code, batch_id),
+        FOREIGN KEY (student_code) REFERENCES students(code) ON DELETE CASCADE,
+        FOREIGN KEY (batch_id) REFERENCES batches(id) ON DELETE CASCADE
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+    `);
+
     // ── Manual attendance overrides (punch edits / status changes) ─────────
     await conn.execute(`
       CREATE TABLE IF NOT EXISTS attendance_overrides (
@@ -79,8 +106,7 @@ async function initDb() {
         punch_in        VARCHAR(10)  DEFAULT NULL COMMENT 'HH:MM',
         punch_out       VARCHAR(10)  DEFAULT NULL COMMENT 'HH:MM',
         manually_edited TINYINT(1)   DEFAULT 1,
-        updated_at      TIMESTAMP    DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-        UNIQUE KEY uq_code_date (student_code, date)
+        updated_at      TIMESTAMP    DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
     `);
 
@@ -90,10 +116,47 @@ async function initDb() {
         id           INT AUTO_INCREMENT PRIMARY KEY,
         student_code VARCHAR(50) NOT NULL,
         date         DATE        NOT NULL,
-        created_at   TIMESTAMP   DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE KEY uq_leave (student_code, date)
+        created_at   TIMESTAMP   DEFAULT CURRENT_TIMESTAMP
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
     `);
+
+    // ── Migrations for attendance_overrides ──────────────────────────────
+    const [overrideCols] = await conn.execute(`
+      SELECT COLUMN_NAME
+      FROM information_schema.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'attendance_overrides' AND COLUMN_NAME = 'batch_id'
+    `);
+    if (overrideCols.length === 0) {
+      console.log("[DB] Migrating attendance_overrides table...");
+      try {
+        await conn.execute("ALTER TABLE attendance_overrides DROP INDEX uq_code_date");
+      } catch (e) {
+        console.log("[DB] Note: Could not drop index uq_code_date (might not exist):", e.message);
+      }
+      await conn.execute("ALTER TABLE attendance_overrides ADD COLUMN batch_id INT DEFAULT NULL");
+      await conn.execute("ALTER TABLE attendance_overrides ADD CONSTRAINT fk_overrides_batch FOREIGN KEY (batch_id) REFERENCES batches(id) ON DELETE CASCADE");
+      await conn.execute("ALTER TABLE attendance_overrides ADD UNIQUE KEY uq_code_date_batch (student_code, date, batch_id)");
+      console.log("[DB] Migrated attendance_overrides table successfully.");
+    }
+
+    // ── Migrations for leaves ──────────────────────────────────────────────
+    const [leaveCols] = await conn.execute(`
+      SELECT COLUMN_NAME
+      FROM information_schema.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'leaves' AND COLUMN_NAME = 'batch_id'
+    `);
+    if (leaveCols.length === 0) {
+      console.log("[DB] Migrating leaves table...");
+      try {
+        await conn.execute("ALTER TABLE leaves DROP INDEX uq_leave");
+      } catch (e) {
+        console.log("[DB] Note: Could not drop index uq_leave (might not exist):", e.message);
+      }
+      await conn.execute("ALTER TABLE leaves ADD COLUMN batch_id INT DEFAULT NULL");
+      await conn.execute("ALTER TABLE leaves ADD CONSTRAINT fk_leaves_batch FOREIGN KEY (batch_id) REFERENCES batches(id) ON DELETE CASCADE");
+      await conn.execute("ALTER TABLE leaves ADD UNIQUE KEY uq_leave_batch (student_code, date, batch_id)");
+      console.log("[DB] Migrated leaves table successfully.");
+    }
 
     console.log("[DB] ✅ Tables ready.");
   } finally {

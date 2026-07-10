@@ -12,7 +12,7 @@ const AUTH_KEY         = process.env.WHATSAPP_AUTH_KEY   || process.env.WABA_AUT
 async function sendWhatsApp(log) {
   try {
     const studentName = log.EmployeeName || "Student";
-    const status      = log.InOutMode === 0 ? "Present" : "Exited";
+    const status      = log.CustomStatus || (log.InOutMode === 0 ? "Present" : "Exited");
     const time        = new Date(log.LogDate || log.DateTime).toLocaleString("en-IN");
 
     const mobile = log.Mobile || log.ContactNumber;
