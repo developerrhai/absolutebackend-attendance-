@@ -41,7 +41,7 @@ function getPool() {
  * @returns {Promise<any[]>}
  */
 async function query(sql, values = []) {
-  const [rows] = await getPool().execute(sql, values);
+  const [rows] = await getPool().query(sql, values);
   return rows;
 }
 
