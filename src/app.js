@@ -9,6 +9,7 @@ const attendanceRouter = require("./routes/attendance");
 const studentsRouter   = require("./routes/students");
 const biometricRouter  = require("./routes/biometric");
 const batchesRouter    = require("./routes/batches");
+const holidaysRouter   = require("./routes/holidays");
 
 const app  = express();
 const PORT = process.env.PORT || 5000;
@@ -51,6 +52,7 @@ app.use("/api/attendance", attendanceRouter);
 app.use("/api/students",   studentsRouter);
 app.use("/api/biometric",  biometricRouter);
 app.use("/api/batches",    batchesRouter);
+app.use("/api/holidays",   holidaysRouter);
 
 // ─── START SERVER ─────────────────────────────────────────
 /* app.listen(PORT, () => {

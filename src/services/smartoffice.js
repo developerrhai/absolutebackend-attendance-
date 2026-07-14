@@ -8,8 +8,8 @@ const DEFAULT_SERIAL     = process.env.SMARTOFFICE_SERIAL_NUMBER || "AMDB2512140
 const DEFAULT_BATCH = {
   id: null,
   name: "General Batch",
-  start_time: "09:00:00",
-  end_time: "17:30:00",
+  start_time: "06:00:00",
+  end_time: "21:00:00",
   late_grace_minutes: 15,
 };
 

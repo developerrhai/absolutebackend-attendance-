@@ -16,7 +16,7 @@ router.get("/", async (req, res) => {
 
 // ── POST /api/batches ────────────────────────────────────────────────────────
 router.post("/", async (req, res) => {
-  const { name, start_time, end_time, late_grace_minutes = 10 } = req.body;
+  const { name, start_time, end_time, late_grace_minutes = 10, scheduled_days = "Mon,Tue,Wed,Thu,Fri" } = req.body;
 
   if (!name || !start_time || !end_time) {
     return res.status(400).json({
@@ -27,9 +27,9 @@ router.post("/", async (req, res) => {
 
   try {
     const result = await query(
-      `INSERT INTO batches (name, start_time, end_time, late_grace_minutes)
-       VALUES (?, ?, ?, ?)`,
-      [name, start_time, end_time, late_grace_minutes]
+      `INSERT INTO batches (name, start_time, end_time, late_grace_minutes, scheduled_days)
+       VALUES (?, ?, ?, ?, ?)`,
+      [name, start_time, end_time, late_grace_minutes, scheduled_days]
     );
 
     const newId = result.insertId;
@@ -44,7 +44,7 @@ router.post("/", async (req, res) => {
 // ── PUT /api/batches/:id ──────────────────────────────────────────────────────
 router.put("/:id", async (req, res) => {
   const { id } = req.params;
-  const { name, start_time, end_time, late_grace_minutes } = req.body;
+  const { name, start_time, end_time, late_grace_minutes, scheduled_days } = req.body;
 
   try {
     const rows = await query("SELECT id FROM batches WHERE id = ?", [id]);
@@ -57,9 +57,10 @@ router.put("/:id", async (req, res) => {
          name               = COALESCE(?, name),
          start_time         = COALESCE(?, start_time),
          end_time           = COALESCE(?, end_time),
-         late_grace_minutes = COALESCE(?, late_grace_minutes)
+         late_grace_minutes = COALESCE(?, late_grace_minutes),
+         scheduled_days     = COALESCE(?, scheduled_days)
        WHERE id = ?`,
-      [name ?? null, start_time ?? null, end_time ?? null, late_grace_minutes ?? null, id]
+      [name ?? null, start_time ?? null, end_time ?? null, late_grace_minutes ?? null, scheduled_days ?? null, id]
     );
 
     const [updated] = await query("SELECT * FROM batches WHERE id = ?", [id]);

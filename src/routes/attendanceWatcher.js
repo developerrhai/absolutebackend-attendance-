@@ -21,6 +21,8 @@ function todayDate() {
 async function checkNewPunches() {
   try {
     const today = todayDate();
+    const holidays = await query("SELECT id FROM holidays WHERE date = ? AND is_closed = 1", [today]);
+    const isHoliday = holidays.length > 0;
 
     const url =
       `${SMARTOFFICE_BASE}/api/v2/WebAPI/GetDeviceLogs` +
@@ -59,6 +61,10 @@ async function checkNewPunches() {
       }
 
       lastLogTime = logTime;
+
+      if (isHoliday) {
+        continue;
+      }
 
       try {
         const studentCode = String(log.EmployeeCode).trim();
@@ -104,6 +110,16 @@ async function checkNewPunches() {
             if (pMin >= sMin - 30 && pMin <= eMin + 30) {
               matchedBatch = b;
               break;
+            }
+          }
+
+          if (matchedBatch && matchedBatch.scheduled_days) {
+            const dayNames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+            const todayDay = dayNames[new Date().getDay()];
+            const days = matchedBatch.scheduled_days.split(",").map((d) => d.trim());
+            if (!days.includes(todayDay)) {
+              console.log(`[Watcher] Suppressing notification: Batch ${matchedBatch.name} is not scheduled on ${todayDay}`);
+              continue;
             }
           }
 

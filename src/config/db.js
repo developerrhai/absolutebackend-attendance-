@@ -62,6 +62,7 @@ async function initDb() {
         start_time         TIME NOT NULL COMMENT 'HH:MM:SS',
         end_time           TIME NOT NULL COMMENT 'HH:MM:SS',
         late_grace_minutes INT DEFAULT 10,
+        scheduled_days     VARCHAR(100) DEFAULT 'Mon,Tue,Wed,Thu,Fri' COMMENT 'Comma-separated weekdays',
         created_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
@@ -120,6 +121,18 @@ async function initDb() {
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
     `);
 
+    // ── Holiday/Calendar records ───────────────────────────────────────────
+    await conn.execute(`
+      CREATE TABLE IF NOT EXISTS holidays (
+        id           INT AUTO_INCREMENT PRIMARY KEY,
+        date         DATE         NOT NULL UNIQUE,
+        reason       VARCHAR(255) DEFAULT '',
+        is_closed    TINYINT(1)   DEFAULT 1 COMMENT '1 = closed, 0 = open',
+        created_at   TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
+        updated_at   TIMESTAMP    DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+    `);
+
     // ── Migrations for attendance_overrides ──────────────────────────────
     const [overrideCols] = await conn.execute(`
       SELECT COLUMN_NAME
@@ -156,6 +169,18 @@ async function initDb() {
       await conn.execute("ALTER TABLE leaves ADD CONSTRAINT fk_leaves_batch FOREIGN KEY (batch_id) REFERENCES batches(id) ON DELETE CASCADE");
       await conn.execute("ALTER TABLE leaves ADD UNIQUE KEY uq_leave_batch (student_code, date, batch_id)");
       console.log("[DB] Migrated leaves table successfully.");
+    }
+
+    // ── Migrations for batches (scheduled_days column) ───────────────────
+    const [batchCols] = await conn.execute(`
+      SELECT COLUMN_NAME
+      FROM information_schema.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'batches' AND COLUMN_NAME = 'scheduled_days'
+    `);
+    if (batchCols.length === 0) {
+      console.log("[DB] Migrating batches table (adding scheduled_days column)...");
+      await conn.execute("ALTER TABLE batches ADD COLUMN scheduled_days VARCHAR(100) DEFAULT 'Mon,Tue,Wed,Thu,Fri' COMMENT 'Comma-separated weekdays'");
+      console.log("[DB] Migrated batches table successfully.");
     }
 
     console.log("[DB] ✅ Tables ready.");
