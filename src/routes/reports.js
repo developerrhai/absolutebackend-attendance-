@@ -21,6 +21,15 @@ function getDatesInRange(startDate, endDate) {
 }
 
 // ── POST /api/reports/generate ─────────────────────────────────────────────
+function escapeCSV(field) {
+  if (field === null || field === undefined) return '';
+  const str = String(field);
+  if (str.includes(',') || str.includes('"') || str.includes('\n')) {
+    return '"' + str.replace(/"/g, '""') + '"';
+  }
+  return str;
+}
+
 router.post("/generate", async (req, res) => {
   const { type, batchId, startDate, endDate } = req.body;
 
@@ -78,29 +87,12 @@ router.post("/generate", async (req, res) => {
         console.warn(`[Reports] SmartOffice error: ${err.message}`);
       }
 
-      // 5. Initialize Excel Stream
-      res.setHeader(
-        "Content-Type",
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-      );
-      res.setHeader(
-        "Content-Disposition",
-        `attachment; filename="attendance_report.xlsx"`
-      );
-
-      const workbook = new ExcelJS.stream.xlsx.WorkbookWriter({ stream: res });
-      const worksheet = workbook.addWorksheet("Attendance");
-
-      worksheet.columns = [
-        { header: "Date", key: "date", width: 15 },
-        { header: "Student Name", key: "name", width: 25 },
-        { header: "Code", key: "code", width: 15 },
-        { header: "Standard/Class", key: "standard", width: 15 },
-        { header: "Batch", key: "batch", width: 25 },
-        { header: "Status", key: "status", width: 15 },
-        { header: "Punch In", key: "punchIn", width: 15 },
-        { header: "Punch Out", key: "punchOut", width: 15 },
-      ];
+      // 5. Initialize CSV Stream
+      res.setHeader("Content-Type", "text/csv");
+      res.setHeader("Content-Disposition", `attachment; filename="attendance_report.csv"`);
+      
+      // Write Header
+      res.write("Date,Student Name,Code,Standard/Class,Batch,Status,Punch In,Punch Out\n");
 
       // 6. Process day by day
       const dates = getDatesInRange(startDate, endDate);
@@ -119,16 +111,10 @@ router.post("/generate", async (req, res) => {
             .map((r) => [`${String(r.student_code).trim()}:${r.batch_id || "null"}`, r])
         );
 
-        // Filter logs for this specific date (LogDate format is usually DD-MM-YYYY or YYYY-MM-DD)
+        // Filter logs for this specific date
         const dateLogs = logs.filter((l) => {
           const logTime = l.LogDate || l.DateTime;
           if (!logTime) return false;
-          // Just pass all logs to buildAttendanceRecords and it will filter them correctly based on time,
-          // but passing the whole array might be slow. We can just pass the whole array for now, 
-          // as buildAttendanceRecords handles sorting and grouping.
-          // Wait, buildAttendanceRecords takes `date` string but processes ALL logs passed to it.
-          // We MUST filter logs by date so they don't leak into other days.
-          // logTime is typically "YYYY-MM-DD HH:MM:SS" or "MM/DD/YYYY"
           const logD = new Date(logTime.replace(" ", "T")).toISOString().split('T')[0];
           return logD === date;
         });
@@ -142,53 +128,39 @@ router.post("/generate", async (req, res) => {
           studentBatchesMap
         );
 
-        // Stream rows to excel
+        // Stream rows to CSV
         for (const record of records) {
           // If a batch filter is applied, skip records not matching the batch
           if (batchId && batchId !== "all" && String(record.batch.id) !== String(batchId)) {
             continue;
           }
 
-          worksheet.addRow({
-            date: record.date,
-            name: record.student.name,
-            code: record.student.code,
-            standard: record.student.standard,
-            batch: record.batch.name,
-            status: record.status,
-            punchIn: record.punchIn || "-",
-            punchOut: record.punchOut || "-",
-          }).commit();
+          const row = [
+            record.date,
+            record.student.name,
+            record.student.code,
+            record.student.standard || "-",
+            record.batch.name,
+            record.status,
+            record.punchIn || "-",
+            record.punchOut || "-"
+          ].map(escapeCSV).join(",");
+          
+          res.write(row + "\n");
         }
       }
 
-      worksheet.commit();
-      await workbook.commit();
+      res.end();
       return; // End response
     } 
     
     if (type === "students") {
-      // Setup Student Report
-      res.setHeader(
-        "Content-Type",
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-      );
-      res.setHeader(
-        "Content-Disposition",
-        `attachment; filename="students_report.xlsx"`
-      );
-
-      const workbook = new ExcelJS.stream.xlsx.WorkbookWriter({ stream: res });
-      const worksheet = workbook.addWorksheet("Students");
-
-      worksheet.columns = [
-        { header: "Code", key: "code", width: 15 },
-        { header: "Name", key: "name", width: 25 },
-        { header: "Gender", key: "gender", width: 10 },
-        { header: "Contact", key: "contact", width: 15 },
-        { header: "Standard", key: "standard", width: 15 },
-        { header: "Batches", key: "batches", width: 30 },
-      ];
+      // Setup Student Report CSV Stream
+      res.setHeader("Content-Type", "text/csv");
+      res.setHeader("Content-Disposition", `attachment; filename="students_report.csv"`);
+      
+      // Write Header
+      res.write("Code,Name,Gender,Contact,Standard,Batches\n");
 
       const students = await query("SELECT * FROM students ORDER BY name ASC");
       const mappings = await query(
@@ -207,24 +179,19 @@ router.post("/generate", async (req, res) => {
       for (const student of students) {
         const studentBatches = studentBatchesMap.get(String(student.code).trim()) || [];
         
-        // If batchId filter is applied, skip students not in this batch
-        if (batchId && batchId !== "all") {
-          // We don't have batchId in the mapping query, let's fix that.
-          // Wait, I only selected `name` in the mapping query. Let's filter on the mapping loop below.
-        }
-
-        worksheet.addRow({
-          code: student.code,
-          name: student.name,
-          gender: student.gender,
-          contact: student.contact,
-          standard: student.standard,
-          batches: studentBatches.map(b => b.name).join(", ") || "General Batch",
-        }).commit();
+        const row = [
+          student.code,
+          student.name,
+          student.gender,
+          student.contact,
+          student.standard || "-",
+          studentBatches.map(b => b.name).join(", ") || "General Batch"
+        ].map(escapeCSV).join(",");
+        
+        res.write(row + "\n");
       }
 
-      worksheet.commit();
-      await workbook.commit();
+      res.end();
       return;
     }
 
